@@ -2,6 +2,8 @@ import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { createClient } from "redis";
+import documentRoutes from "./routes/documentRoutes.js";
+
 
 dotenv.config();
 
@@ -10,7 +12,7 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(express.json());
-
+app.use("/api/documents", documentRoutes);
 // Connect to MongoDB
 const mongoURI = process.env.MONGO_URI;
 mongoose

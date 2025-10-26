@@ -37,9 +37,16 @@ router.get("/:id", async (req, res) => {
 // Update a document
 router.put("/:id", async (req, res) => {
   try {
-    const updatedDoc = await Document.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-    });
+    const updatedDoc = await Document.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, updatedAt: Date.now() },
+      { new: true }
+    );
+
+    if (!updatedDoc) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
     res.json(updatedDoc);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -1,9 +1,9 @@
 import express from "express";
 import dotenv from "dotenv";
+import cors from "cors";
 import mongoose from "mongoose";
 import { createClient } from "redis";
 import documentRoutes from "./routes/documentRoutes.js";
-
 
 dotenv.config();
 
@@ -11,6 +11,11 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
+app.use(cors({
+  origin: "http://localhost:5173",
+  methods: ["GET", "POST", "PUT", "DELETE"],
+  credentials: true
+}));
 app.use(express.json());
 app.use("/api/documents", documentRoutes);
 // Connect to MongoDB

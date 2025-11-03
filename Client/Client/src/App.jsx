@@ -1,53 +1,100 @@
 import { useEffect, useState } from "react";
-import { io } from "socket.io-client";
+import Sidebar from "./components/Sidebar";
+import {
+  getDocuments,
+  createDocument,
+  updateDocument,
+  deleteDocument,
+} from "./api/documentService";
 
-const socket = io("http://localhost:4000");
-
-function App() {
-  const [content, setContent] = useState("");
-  const docId = "demo-doc";
+export default function App() {
+  const [documents, setDocuments] = useState([]);
+  const [selectedDoc, setSelectedDoc] = useState(null);
 
   useEffect(() => {
-    socket.emit("join-document", docId);
+    loadDocs();
+  }, []);
 
-    socket.on("load-document", (data) => setContent(data));
-    socket.on("receive-changes", (data) => setContent(data));
+  const loadDocs = async () => {
+    const res = await getDocuments();
+    setDocuments(res.data);
+  };
 
-    const interval = setInterval(() => {
-      socket.emit("save-document", content);
-    }, 5000);
+  const handleCreate = async () => {
+    const res = await createDocument({
+      title: "Untitled Document",
+      content: ""
+    });
 
-    return () => {
-      clearInterval(interval);
-      socket.off("load-document");
-      socket.off("receive-changes");
-    };
-  }, [content, docId]);
+    await loadDocs();
+    setSelectedDoc(res.data);
+  };
 
-  const handleChange = (e) => {
-    const text = e.target.value;
-    setContent(text);
-    socket.emit("send-changes", text);
+  const handleSelect = (docId) => {
+    const doc = documents.find((d) => d._id === docId);
+    setSelectedDoc(doc);
+  };
+
+  const handleDelete = async (docId) => {
+    await deleteDocument(docId);
+    await loadDocs();
+    setSelectedDoc(null);
+  };
+
+  const handleRename = async (id, title) => {
+    await updateDocument(id, { title });
+
+    setDocuments((prev) =>
+      prev.map((doc) => (doc._id === id ? { ...doc, title } : doc))
+    );
+
+    if (selectedDoc && selectedDoc._id === id) {
+      setSelectedDoc((prev) => ({ ...prev, title }));
+    }
+  };
+
+  const handleChange = async (content) => {
+    const updatedDoc = { ...selectedDoc, content };
+    setSelectedDoc(updatedDoc);
+
+    setDocuments((prev) =>
+      prev.map((doc) => (doc._id === updatedDoc._id ? updatedDoc : doc))
+    );
+
+    await updateDocument(updatedDoc._id, updatedDoc);
   };
 
   return (
-    <div style={{ padding: "2rem" }}>
-      <h1> SyncScribe — Collaborative Document Editor</h1>
-      <textarea
-        value={content}
-        onChange={handleChange}
-        rows="20"
-        cols="80"
-        style={{
-          width: "100%",
-          height: "70vh",
-          fontSize: "16px",
-          borderRadius: "8px",
-          padding: "10px",
-        }}
+    <div style={{ display: "flex", height: "100vh", width: "100vw" }}>
+      <Sidebar
+        documents={documents}
+        selectedId={selectedDoc?._id}
+        onSelect={handleSelect}
+        onCreate={handleCreate}
+        onDelete={handleDelete}
+        onRename={handleRename}
       />
+
+      <div style={{ flex: 1, padding: "10px" }}>
+        {selectedDoc ? (
+          <textarea
+            style={{
+              width: "100%",
+              height: "100%",
+              fontSize: "18px",
+              padding: "10px",
+              border: "1px solid #ccc",
+              resize: "none"
+            }}
+            value={selectedDoc.content}
+            onChange={(e) => handleChange(e.target.value)}
+          />
+        ) : (
+          <p style={{ fontSize: "18px" }}>
+            Select or create a document to start editing
+          </p>
+        )}
+      </div>
     </div>
   );
 }
-
-export default App;

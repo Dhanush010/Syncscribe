@@ -1,0 +1,49 @@
+services:
+  client:
+    build:
+      context: ./Client/Client
+      dockerfile: Dockerfile
+    container_name: syncscribe-client
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:5000/api
+      - VITE_WS_URL=ws://localhost:5000
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+
+  server:
+    build:
+      context: ./Server
+      dockerfile: Dockerfile
+    container_name: syncscribe-server
+    ports:
+      - "5000:5000"
+    environment:
+      - MONGO_URL=mongodb://mongo:27017/realtimenotes
+      - MONGO_URI=mongodb://mongo:27017/realtimenotes
+      - JWT_SECRET=your_jwt_secret_change_in_production
+      - CLIENT_URL=http://localhost:5173
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:6.0
+    container_name: syncscribe-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongo-data:

@@ -1,4 +1,7 @@
 // server/server.js
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 import { WebSocketServer } from "ws";
@@ -13,11 +16,25 @@ import commentRoutes from "./routes/commentRoutes.js";
 import exportRoutes from "./routes/exportRoutes.js";
 
 const app = express();
+const MONGO_URI = process.env.MONGO_URL || process.env.MONGO_URI || "mongodb://localhost:27017/realtimenotes";
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+// LOG THE CONNECTION STRING TO VERIFY
+console.log("🔍 Connecting to MongoDB:", MONGO_URI);
+console.log("🔍 MONGO_URL env var:", process.env.MONGO_URL);
+console.log("🔍 MONGO_URI env var:", process.env.MONGO_URI);
+
 app.use(cors({
-  origin: "http://localhost:5173",
+  origin: CLIENT_URL,
   credentials: true
 }));
 app.use(express.json());
+
+// Log ALL requests
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  next();
+});
 
 app.use("/api/auth", authRoutes);
 app.use("/api/documents", documentRoutes);
@@ -26,19 +43,31 @@ app.use("/api/comments", commentRoutes);
 app.use("/api/export", exportRoutes);
 
 // MongoDB connect
+console.log("🔍 Attempting to connect to MongoDB with URI:", MONGO_URI);
 mongoose
-  .connect("mongodb://localhost:27017/realtimenotes")
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("Mongo connect error:", err));
+  .connect(MONGO_URI)
+  .then(() => {
+    console.log("✅ MongoDB Connected successfully to:", MONGO_URI);
+    // Verify we can query documents
+    mongoose.connection.db.listCollections().toArray().then(collections => {
+      console.log("📁 Available collections:", collections.map(c => c.name));
+    });
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection error:", err);
+    console.error("❌ Failed to connect to:", MONGO_URI);
+  });
 
-const server = app.listen(5000, () => console.log("✅ Server running on http://localhost:5000"));
+const PORT = process.env.PORT || 5000;
+const server = app.listen(PORT, "0.0.0.0", () => console.log(`✅ Server running on http://0.0.0.0:${PORT}`));
 
 const wss = new WebSocketServer({ 
   server,
   verifyClient: (info) => {
     // Allow connection, authenticate in onconnection
     return true;
-  }
+  },
+  host: "0.0.0.0"
 });
 
 // clients map and per-doc sets
@@ -140,21 +169,8 @@ wss.on("connection", (ws, req) => {
           return;
         }
 
-        // Check permission
-        if (userId) {
-          // Allow access if document has no owner (created before auth)
-          if (!doc.owner) {
-            // Allow access
-          } else {
-            const isOwner = doc.owner.toString() === userId.toString();
-            const hasPermission = doc.permissions.some(p => p.user && p.user.toString() === userId.toString());
-            
-            if (!isOwner && !hasPermission && !doc.shareLink) {
-              ws.send(JSON.stringify({ type: "ERROR", message: "Access denied" }));
-              return;
-            }
-          }
-        }
+        // Collaborative mode: all authenticated users can access all documents
+        // No permission check needed - all users can join any document
 
         info.docId = docId;
         clients.set(ws, info);
@@ -171,21 +187,30 @@ wss.on("connection", (ws, req) => {
 
         // Send current document contents - always send latest from DB
         let content = freshDoc.content || "";
+        console.log(`[JOIN_DOC] User ${info.username} (${info.userId}) joining document ${docId}`);
+        console.log(`[JOIN_DOC] Document content type: ${typeof content}, length: ${typeof content === 'string' ? content.length : 'N/A'}`);
+        
         try {
           // Try to parse as JSON (Quill delta format)
           if (typeof content === "string" && content.trim()) {
             const parsed = JSON.parse(content);
+            console.log(`[JOIN_DOC] Sending DOC_SYNC with parsed delta (ops: ${parsed.ops?.length || 0})`);
             ws.send(JSON.stringify({ type: "DOC_SYNC", docId, content: parsed }));
           } else if (content && typeof content === "object") {
+            console.log(`[JOIN_DOC] Sending DOC_SYNC with object content (ops: ${content.ops?.length || 0})`);
             ws.send(JSON.stringify({ type: "DOC_SYNC", docId, content }));
           } else {
             // Empty or plain text
+            console.log(`[JOIN_DOC] Sending DOC_SYNC with plain text/empty content`);
             ws.send(JSON.stringify({ type: "DOC_SYNC", docId, content: content || "" }));
           }
         } catch (parseErr) {
           // If parsing fails, send as plain text
+          console.log(`[JOIN_DOC] Parse error, sending as plain text:`, parseErr.message);
           ws.send(JSON.stringify({ type: "DOC_SYNC", docId, content: content || "" }));
         }
+        
+        console.log(`[JOIN_DOC] DOC_SYNC sent to user ${info.username} for document ${docId}`);
 
         // Send current highlights
         if (highlights[docId]) {
@@ -226,29 +251,8 @@ wss.on("connection", (ws, req) => {
     if (data.type === "UPDATE_DOC") {
       const { docId, delta } = data;
       
-      // Check permission for editing
-      if (userId) {
-        try {
-          const doc = await Document.findById(docId);
-          if (doc) {
-            // Allow editing if document has no owner (created before auth)
-            if (!doc.owner) {
-              // Allow editing
-            } else {
-              const isOwner = doc.owner.toString() === userId.toString();
-              const perm = doc.permissions.find(p => p.user && p.user.toString() === userId.toString());
-              const canEdit = isOwner || (perm && perm.role === "editor");
-              
-              if (!canEdit && !doc.shareLink) {
-                ws.send(JSON.stringify({ type: "ERROR", message: "Edit permission denied" }));
-                return;
-              }
-            }
-          }
-        } catch (err) {
-          console.error("Permission check error:", err);
-        }
-      }
+      // Collaborative mode: all authenticated users can edit all documents
+      // No permission check needed
       
       // Broadcast to everyone else
       broadcastToDoc(docId, { 

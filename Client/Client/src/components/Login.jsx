@@ -24,7 +24,10 @@ export default function Login({ onLogin }) {
       localStorage.setItem("user", JSON.stringify(res.data.user));
       onLogin(res.data.user);
     } catch (err) {
-      setError(err.response?.data?.error || "Authentication failed");
+      console.error("Auth error:", err);
+      const errorMessage = err.response?.data?.error || err.message || "Authentication failed";
+      setError(errorMessage);
+      console.error("Full error:", JSON.stringify(err, null, 2));
     } finally {
       setLoading(false);
     }

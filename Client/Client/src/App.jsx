@@ -25,15 +25,12 @@ import QuillCursors from "quill-cursors";
 import Delta from "quill-delta";
 
 // Only register cursors module once (prevents warning in React strict mode)
-// Check if already registered by trying to import it
-try {
-  Quill.import("modules/cursors");
-} catch (e) {
-  // Not registered yet, register it now
+// Check if already registered by checking Quill.imports
+if (!Quill.imports['modules/cursors']) {
   Quill.register("modules/cursors", QuillCursors);
 }
 
-const WS_URL = "ws://localhost:5000";
+const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:5000";
 const RECONNECT_DELAY = 2000;
 
 // minimal toolbar
@@ -69,6 +66,7 @@ export default function App() {
   const highlightsRef = useRef({});
   const userIdRef = useRef(null);
   const authenticatedRef = useRef(false);
+  const pendingDocSyncRef = useRef(null); // Store pending DOC_SYNC messages
 
   // Check authentication on mount
   useEffect(() => {
@@ -137,41 +135,89 @@ export default function App() {
         }
 
         if (data.type === "DOC_SYNC") {
-          if (!quillRef.current) return;
+          console.log("Received DOC_SYNC for docId:", data.docId, "Current selected:", selectedDocRef.current?._id);
           
-          // Always apply DOC_SYNC if it's for the currently selected document
-          // This ensures users always see the latest content from the database when joining
-          if (data.docId && selectedDocRef.current && data.docId === selectedDocRef.current._id) {
+          // Helper function to apply DOC_SYNC content
+          const applyDocSync = (syncData) => {
+            if (!quillRef.current) {
+              console.log("Quill not ready, storing DOC_SYNC for later");
+              pendingDocSyncRef.current = syncData;
+              return;
+            }
+            
             try {
+              console.log("Applying DOC_SYNC content to Quill");
               let contentToSet;
-              if (typeof data.content === "string") {
+              if (typeof syncData.content === "string") {
                 try {
-                  contentToSet = JSON.parse(data.content);
+                  contentToSet = JSON.parse(syncData.content);
                 } catch {
-                  contentToSet = data.content;
+                  contentToSet = syncData.content;
                 }
               } else {
-                contentToSet = data.content;
+                contentToSet = syncData.content;
               }
               
               // Apply the content
               if (contentToSet && typeof contentToSet === "object" && contentToSet.ops) {
+                console.log("Setting Quill content from delta (ops:", contentToSet.ops.length, ")");
                 quillRef.current.setContents(contentToSet, "silent");
-              } else if (typeof contentToSet === "string") {
-                quillRef.current.setText(contentToSet || "", "silent");
+              } else if (typeof contentToSet === "string" && contentToSet) {
+                console.log("Setting Quill content as text:", contentToSet.substring(0, 50));
+                quillRef.current.setText(contentToSet, "silent");
               } else {
-                quillRef.current.setContents({ ops: [] }, "silent");
+                console.log("Empty content, clearing editor");
+                quillRef.current.setContents({ ops: [{ insert: "\n" }] }, "silent");
               }
 
               // Clear unsaved changes after sync - server content is authoritative
-              localStorage.removeItem(`unsaved_${selectedDocRef.current._id}`);
+              if (selectedDocRef.current) {
+                localStorage.removeItem(`unsaved_${selectedDocRef.current._id}`);
+              }
+              console.log("✅ DOC_SYNC applied successfully");
+              pendingDocSyncRef.current = null; // Clear pending sync
             } catch (err) {
-              console.error("Error applying DOC_SYNC:", err);
+              console.error("❌ Error applying DOC_SYNC:", err);
               // Fallback to text
-              if (typeof data.content === "string") {
-                quillRef.current.setText(data.content || "", "silent");
+              if (typeof syncData.content === "string" && quillRef.current) {
+                quillRef.current.setText(syncData.content || "", "silent");
               }
             }
+          };
+          
+          // Convert both IDs to strings for reliable comparison
+          const syncDocId = String(data.docId || "");
+          const selectedDocId = selectedDocRef.current ? String(selectedDocRef.current._id || "") : "";
+          
+          console.log("DOC_SYNC comparison - syncDocId:", syncDocId, "selectedDocId:", selectedDocId, "match:", syncDocId === selectedDocId);
+          
+          // CRITICAL FIX: Always store DOC_SYNC if it matches the selected document OR if no document is selected yet
+          // This handles race conditions where DOC_SYNC arrives before selectedDocRef is set
+          if (syncDocId) {
+            // If this DOC_SYNC matches the currently selected document, apply it
+            if (selectedDocId && syncDocId === selectedDocId) {
+              console.log("✅ DOC_SYNC matches selected document, applying now");
+              applyDocSync(data);
+            } else {
+              // Store for later - it might be for a document that's about to be selected
+              // OR it might be for a document that was just selected but ref isn't set yet
+              console.log("📦 Storing DOC_SYNC for docId:", syncDocId, "(selectedDocId:", selectedDocId, ")");
+              pendingDocSyncRef.current = data;
+              
+              // Also try to apply if Quill is ready (handles case where doc is selected but ref not updated yet)
+              if (quillRef.current) {
+                // Small delay to allow selectedDocRef to be set
+                setTimeout(() => {
+                  const currentSelectedId = selectedDocRef.current ? String(selectedDocRef.current._id || "") : "";
+                  if (currentSelectedId === syncDocId && pendingDocSyncRef.current) {
+                    console.log("✅ Applying stored DOC_SYNC after delay");
+                    applyDocSync(pendingDocSyncRef.current);
+                  }
+                }, 50);
+              }
+            }
+          } else {
+            console.log("⚠️ DOC_SYNC ignored - no docId in message");
           }
         }
 
@@ -348,10 +394,17 @@ export default function App() {
 
   const loadDocs = async () => {
     try {
+      console.log("Loading documents...");
       const res = await getDocuments();
-      setDocuments(res.data);
+      console.log(`✅ Documents loaded: ${res.data.length} documents from server`);
+      console.log("Document list:", res.data.map(d => ({ id: d._id, title: d.title })));
+      
+      // Set documents directly - NO FILTERING
+      setDocuments(res.data || []);
     } catch (err) {
-      console.error("Failed to load docs", err);
+      console.error("❌ Failed to load docs", err);
+      console.error("Error details:", err.response?.data || err.message);
+      setDocuments([]);
     }
   };
 
@@ -461,6 +514,32 @@ export default function App() {
     if (selectedDocRef.current) {
       const loadSelectedDoc = async () => {
         try {
+          // Check if there's a pending DOC_SYNC for this document
+          if (pendingDocSyncRef.current && 
+              String(pendingDocSyncRef.current.docId) === String(selectedDocRef.current._id)) {
+            console.log("Applying pending DOC_SYNC after Quill initialization");
+            const syncData = pendingDocSyncRef.current;
+            pendingDocSyncRef.current = null;
+            
+            let contentToSet;
+            if (typeof syncData.content === "string") {
+              try {
+                contentToSet = JSON.parse(syncData.content);
+              } catch {
+                contentToSet = syncData.content;
+              }
+            } else {
+              contentToSet = syncData.content;
+            }
+            
+            if (contentToSet && typeof contentToSet === "object" && contentToSet.ops) {
+              quillRef.current.setContents(contentToSet, "silent");
+            } else if (typeof contentToSet === "string" && contentToSet) {
+              quillRef.current.setText(contentToSet, "silent");
+            }
+            return;
+          }
+          
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ type: "JOIN_DOC", docId: selectedDocRef.current._id }));
           } else {
@@ -491,46 +570,112 @@ export default function App() {
   useEffect(() => {
     if (!selectedDoc || !authenticated) {
       selectedDocRef.current = null;
+      if (quillRef.current) {
+        quillRef.current.setText("", "silent");
+      }
       return;
     }
 
+    console.log("📄 Document selected:", selectedDoc._id, selectedDoc.title);
+    // CRITICAL: Set selectedDocRef IMMEDIATELY so DOC_SYNC handler can match it
     selectedDocRef.current = selectedDoc;
-
-    // Wait for Quill to be initialized
-    if (!quillRef.current) {
-      console.log("Waiting for Quill to initialize...");
-      return;
+    
+    // Check if there's already a pending DOC_SYNC for this document
+    if (pendingDocSyncRef.current && 
+        String(pendingDocSyncRef.current.docId) === String(selectedDoc._id)) {
+      console.log("⚠️ Found pending DOC_SYNC for this document - will apply in loadDocumentContent");
     }
-
-    // Clear current content first to avoid showing stale content
-    quillRef.current.setText("", "silent");
 
     // Function to load document content
     const loadDocumentContent = async () => {
+      // Wait for Quill to be initialized
+      if (!quillRef.current) {
+        console.log("Waiting for Quill to initialize before loading document...");
+        // Retry after a short delay
+        setTimeout(loadDocumentContent, 100);
+        return;
+      }
+
+      console.log("Loading content for document:", selectedDoc._id);
+
+      // CRITICAL: Check for pending DOC_SYNC FIRST before clearing or loading
+      // This handles the case where DOC_SYNC arrived before this useEffect ran
+      const checkAndApplyPendingSync = () => {
+        if (pendingDocSyncRef.current && 
+            String(pendingDocSyncRef.current.docId) === String(selectedDoc._id)) {
+          console.log("✅ Found pending DOC_SYNC for this document, applying it now");
+          const syncData = pendingDocSyncRef.current;
+          pendingDocSyncRef.current = null;
+          
+          let contentToSet;
+          if (typeof syncData.content === "string") {
+            try {
+              contentToSet = JSON.parse(syncData.content);
+            } catch {
+              contentToSet = syncData.content;
+            }
+          } else {
+            contentToSet = syncData.content;
+          }
+          
+          if (contentToSet && typeof contentToSet === "object" && contentToSet.ops) {
+            console.log("Applying pending DOC_SYNC delta (ops:", contentToSet.ops.length, ")");
+            quillRef.current.setContents(contentToSet, "silent");
+          } else if (typeof contentToSet === "string" && contentToSet) {
+            console.log("Applying pending DOC_SYNC as text");
+            quillRef.current.setText(contentToSet, "silent");
+          } else {
+            quillRef.current.setContents({ ops: [{ insert: "\n" }] }, "silent");
+          }
+          localStorage.removeItem(`unsaved_${selectedDoc._id}`);
+          return true; // Indicates we applied pending sync
+        }
+        return false; // No pending sync
+      };
+
+      // Try to apply pending sync first
+      if (checkAndApplyPendingSync()) {
+        console.log("✅ Applied pending DOC_SYNC, skipping HTTP/WS load");
+        return; // Exit early if we applied pending sync
+      }
+
+      // Clear current content first to avoid showing stale content
+      quillRef.current.setText("", "silent");
+
       try {
         // Always try to join via WebSocket first - it will send DOC_SYNC with latest content
         // This ensures all users see the same content from the database
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          console.log("Joining document via WebSocket:", selectedDoc._id);
           // Join document via WebSocket - server will send DOC_SYNC with latest content from DB
           wsRef.current.send(JSON.stringify({ type: "JOIN_DOC", docId: selectedDoc._id }));
         } else {
+          console.log("WebSocket not ready, loading via HTTP:", selectedDoc._id);
           // Fallback: Load from server if WebSocket not ready yet
           // This will be overwritten by DOC_SYNC when WebSocket connects
           const res = await getDocumentById(selectedDoc._id);
           const doc = res.data;
-          if (doc?.content && quillRef.current) {
-            try {
-              const parsed = typeof doc.content === "string" ? JSON.parse(doc.content) : doc.content;
-              if (parsed && typeof parsed === "object" && parsed.ops) {
-                quillRef.current.setContents(parsed, "silent");
-              } else {
+          console.log("Document loaded via HTTP:", doc.title, "Content:", doc.content ? "present" : "empty");
+          
+          if (quillRef.current) {
+            if (doc?.content) {
+              try {
+                const parsed = typeof doc.content === "string" ? JSON.parse(doc.content) : doc.content;
+                if (parsed && typeof parsed === "object" && parsed.ops) {
+                  console.log("Setting Quill content from delta");
+                  quillRef.current.setContents(parsed, "silent");
+                } else {
+                  console.log("Setting Quill content as text");
+                  quillRef.current.setText(doc.content || "", "silent");
+                }
+              } catch (parseErr) {
+                console.log("Parse error, setting as text:", parseErr);
                 quillRef.current.setText(doc.content || "", "silent");
               }
-            } catch {
-              quillRef.current.setText(doc.content || "", "silent");
+            } else {
+              console.log("No content, clearing editor");
+              quillRef.current.setText("", "silent");
             }
-          } else if (quillRef.current) {
-            quillRef.current.setText("", "silent");
           }
         }
       } catch (err) {

@@ -8,15 +8,24 @@ export default function PresenceAvatars({ users, currentUserId, currentUsername 
     return username.substring(0, 2).toUpperCase();
   };
 
+  // Deduplicate users by userId or username to prevent duplicate keys
+  const uniqueUsers = users.reduce((acc, user) => {
+    const key = user.userId || user.username;
+    if (!acc.find(u => (u.userId || u.username) === key)) {
+      acc.push(user);
+    }
+    return acc;
+  }, []);
+
   return (
     <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-      {users.length === 0 ? (
+      {uniqueUsers.length === 0 ? (
         <span style={{ color: "#888" }}>No users</span>
       ) : (
         <>
-          {users.map((user) => (
+          {uniqueUsers.map((user, index) => (
             <div
-              key={user.userId || user.username}
+              key={user.userId || user.username || `user-${index}`}
               title={user.username}
               style={{
                 width: "32px",
@@ -41,7 +50,7 @@ export default function PresenceAvatars({ users, currentUserId, currentUsername 
               {getInitials(user.username)}
             </div>
           ))}
-          <span style={{ color: "#888", fontSize: "14px" }}>({users.length})</span>
+          <span style={{ color: "#888", fontSize: "14px" }}>({uniqueUsers.length})</span>
         </>
       )}
     </div>
